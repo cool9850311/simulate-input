@@ -10,6 +10,7 @@ SimulateInput — macOS Menu Bar App
 - UI 更新：polling rumps.Timer（主執行緒），simulation thread 只寫 state dict
 """
 
+import json
 import os
 import random
 import sys
@@ -21,7 +22,9 @@ import AppKit
 import rumps
 from Quartz import (
     CGEventCreateKeyboardEvent,
+    CGEventCreateMouseEvent,
     CGEventPost,
+    kCGEventMouseMoved,
     kCGHIDEventTap,
 )
 
@@ -35,7 +38,7 @@ _SAFE_VKS = [
 ]
 
 # ── 預設參數 ──────────────────────────────────────────────────────────────────
-DEFAULT_IDLE_TIMEOUT = 30
+DEFAULT_IDLE_TIMEOUT = 180
 DEFAULT_INTERVAL_MIN = 5
 DEFAULT_INTERVAL_MAX = 15
 
@@ -45,6 +48,9 @@ else:
     _resources = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(_resources, "icons")
 LOG_MAX = 20
+_config_dir = os.path.expanduser("~/Library/Application Support/SimulateInput")
+os.makedirs(_config_dir, exist_ok=True)
+CONFIG_PATH = os.path.join(_config_dir, "config.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TITLE_FALLBACK = {"running": "▶", "paused": "⏸", "stopped": "⏹"}
@@ -62,6 +68,20 @@ def simulate_key(vk: int):
     up   = CGEventCreateKeyboardEvent(None, vk, False)
     CGEventPost(kCGHIDEventTap, down)
     CGEventPost(kCGHIDEventTap, up)
+
+
+def simulate_activity_burst(stop_event: threading.Event, duration: float = 6.0, step_interval: float = 0.2):
+    """持續微移滑鼠 duration 秒，若 stop_event 被清除則立即中斷。"""
+    loc = AppKit.NSEvent.mouseLocation()
+    x, y = loc.x, loc.y
+    steps = int(duration / step_interval)
+    for i in range(steps):
+        if not stop_event.is_set():
+            break
+        offset = 50 if i % 2 == 0 else -50
+        e = CGEventCreateMouseEvent(None, kCGEventMouseMoved, (x + offset, y), 0)
+        CGEventPost(kCGHIDEventTap, e)
+        time.sleep(step_interval)
 
 
 class SimulateInputApp(rumps.App):
@@ -91,9 +111,10 @@ class SimulateInputApp(rumps.App):
         self._log_lock = threading.Lock()
 
         # ── 參數 ──────────────────────────────────────────────────────────────
-        self.idle_timeout = DEFAULT_IDLE_TIMEOUT
-        self.interval_min = DEFAULT_INTERVAL_MIN
-        self.interval_max = DEFAULT_INTERVAL_MAX
+        cfg = self._load_config()
+        self.idle_timeout = cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
+        self.interval_min = cfg.get("interval_min", DEFAULT_INTERVAL_MIN)
+        self.interval_max = cfg.get("interval_max", DEFAULT_INTERVAL_MAX)
 
         # ── Menu 項目 ─────────────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("狀態：已停止")
@@ -244,7 +265,8 @@ class SimulateInputApp(rumps.App):
                 continue
             vk = random.choice(_SAFE_VKS)
             simulate_key(vk)
-            self._add_log(f"按鍵：{_VK_NAMES[vk]}（下次 {interval:.0f}s 後）")
+            simulate_activity_burst(self._resume_event)
+            self._add_log(f"按鍵：{_VK_NAMES[vk]} + 連續滑鼠活動 6s（下次 {interval:.0f}s 後）")
 
     # ── 使用者輸入回呼（主執行緒）─────────────────────────────────────────────
     def _on_user_input(self):
@@ -266,6 +288,25 @@ class SimulateInputApp(rumps.App):
             self._resume_event.set()
             self._add_log(f"▶ 無輸入 {self.idle_timeout}s，恢復模擬")
             self._request_ui("running", "狀態：執行中", "⏹  停止")
+
+    # ── 設定持久化 ──────────────────────────────────────────────────────────────
+    def _load_config(self) -> dict:
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_config(self):
+        try:
+            with open(CONFIG_PATH, "w") as f:
+                json.dump({
+                    "idle_timeout": self.idle_timeout,
+                    "interval_min": self.interval_min,
+                    "interval_max": self.interval_max,
+                }, f)
+        except Exception:
+            pass
 
     # ── 開機自動啟動 ────────────────────────────────────────────────────────────
     def toggle_login(self, sender):
@@ -304,6 +345,7 @@ class SimulateInputApp(rumps.App):
             self.idle_timeout = int(r.text.strip())
             self._param_idle.title = f"Idle Timeout：{self.idle_timeout}s"
             self._add_log(f"Idle Timeout 改為 {self.idle_timeout}s")
+            self._save_config()
 
     def set_interval_min(self, _):
         w = rumps.Window(message="輸入最短間隔（秒）：", title="調整參數",
@@ -316,6 +358,7 @@ class SimulateInputApp(rumps.App):
                 self.interval_min = v
                 self._param_min.title = f"最短間隔：{self.interval_min}s"
                 self._add_log(f"最短間隔改為 {self.interval_min}s")
+                self._save_config()
             else:
                 rumps.alert("錯誤", "最短間隔必須小於最長間隔")
 
@@ -330,6 +373,7 @@ class SimulateInputApp(rumps.App):
                 self.interval_max = v
                 self._param_max.title = f"最長間隔：{self.interval_max}s"
                 self._add_log(f"最長間隔改為 {self.interval_max}s")
+                self._save_config()
             else:
                 rumps.alert("錯誤", "最長間隔必須大於最短間隔")
 
