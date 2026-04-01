@@ -1,0 +1,33 @@
+[project]
+name = "simulate-input"
+version = "1.0.0"
+description = "macOS menu bar app to prevent screen lock by simulating keystrokes"
+requires-python = ">=3.12"
+dependencies = [
+    "pillow==12.1.1",
+    "py2app>=0.28.10",
+    "pynput==1.7.6",
+    "pyobjc-core==12.1",
+    "pyobjc-framework-applicationservices==10.3.2",
+    "pyobjc-framework-servicemanagement==12.1",
+    "rumps==0.4.0",
+]
+
+[tool.py2app]
+app = ["app_main.py"]
+data_files = [["icons", ["icons/running.png", "icons/paused.png", "icons/stopped.png"]]]
+
+[tool.py2app.options]
+argv_emulation = false
+packages = ["rumps", "pynput", "PIL"]
+includes = ["ApplicationServices", "HIServices", "Quartz", "CoreFoundation", "ServiceManagement"]
+excludes = ["tkinter"]
+
+[tool.py2app.plist]
+CFBundleName = "SimulateInput"
+CFBundleDisplayName = "SimulateInput"
+CFBundleIdentifier = "com.user.simulate-input"
+CFBundleVersion = "1.0.0"
+CFBundleShortVersionString = "1.0.0"
+LSUIElement = true
+NSAccessibilityUsageDescription = "SimulateInput 需要輔助使用權限以監聽鍵盤/滑鼠活動並模擬按鍵。"

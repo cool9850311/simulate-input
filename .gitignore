@@ -1,0 +1,27 @@
+# py2app build output
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# macOS
+.DS_Store
+*.swp
+
+# Logs
+*.log
+nohup.out
+
+# Claude
+.claude/
