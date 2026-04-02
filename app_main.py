@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime
 
 import AppKit
 import rumps
@@ -41,6 +42,9 @@ _SAFE_VKS = [
 DEFAULT_IDLE_TIMEOUT = 180
 DEFAULT_INTERVAL_MIN = 5
 DEFAULT_INTERVAL_MAX = 15
+DEFAULT_SCHEDULE_START = "09:00"
+DEFAULT_SCHEDULE_STOP = "18:00"
+DEFAULT_SCHEDULE_WEEKDAYS = "weekdays"  # "all" | "weekdays" | "weekend" | "custom:0,1,2,3,4"
 
 if getattr(sys, "frozen", False):
     _resources = os.path.join(os.path.dirname(sys.executable), "..", "Resources")
@@ -115,6 +119,10 @@ class SimulateInputApp(rumps.App):
         self.idle_timeout = cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
         self.interval_min = cfg.get("interval_min", DEFAULT_INTERVAL_MIN)
         self.interval_max = cfg.get("interval_max", DEFAULT_INTERVAL_MAX)
+        self.schedule_enabled = cfg.get("schedule_enabled", False)
+        self.schedule_start = cfg.get("schedule_start", DEFAULT_SCHEDULE_START)
+        self.schedule_stop = cfg.get("schedule_stop", DEFAULT_SCHEDULE_STOP)
+        self.schedule_weekdays = cfg.get("schedule_weekdays", DEFAULT_SCHEDULE_WEEKDAYS)
 
         # ── Menu 項目 ─────────────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("狀態：已停止")
@@ -124,6 +132,22 @@ class SimulateInputApp(rumps.App):
 
         self._login_item = rumps.MenuItem("開機自動啟動", callback=self.toggle_login)
         self._login_item.state = self._get_login_state()
+
+        self._schedule_item = rumps.MenuItem("定時啟動/關閉", callback=self.toggle_schedule)
+        self._schedule_item.state = 1 if self.schedule_enabled else 0
+
+        self._schedule_start_item = rumps.MenuItem(
+            f"啟動時間：{self.schedule_start}", callback=self.set_schedule_start)
+        self._schedule_stop_item = rumps.MenuItem(
+            f"關閉時間：{self.schedule_stop}", callback=self.set_schedule_stop)
+        self._schedule_weekdays_item = rumps.MenuItem(
+            f"執行日期：{self._get_weekdays_label()}", callback=self.set_schedule_weekdays)
+        schedule_config_menu = rumps.MenuItem("設定定時啟動")
+        schedule_config_menu.update([
+            self._schedule_start_item,
+            self._schedule_stop_item,
+            self._schedule_weekdays_item
+        ])
 
         self._param_idle = rumps.MenuItem(
             f"Idle Timeout：{self.idle_timeout}s", callback=self.set_idle_timeout)
@@ -144,6 +168,9 @@ class SimulateInputApp(rumps.App):
             self._status_item, None,
             self._toggle_item, None,
             self._login_item,  None,
+            self._schedule_item,
+            schedule_config_menu,
+            None,
             params_menu,
             None,
             self._perm_accessibility,
@@ -156,6 +183,10 @@ class SimulateInputApp(rumps.App):
         # ── 每 0.5 秒在主執行緒同步 UI（避免 cross-thread UI 更新）───────────
         self._ui_sync_timer = rumps.Timer(self._sync_ui, 0.5)
         self._ui_sync_timer.start()
+
+        # ── 每 60 秒檢查定時啟動/關閉 ────────────────────────────────────────
+        self._schedule_timer = rumps.Timer(self._check_schedule, 60)
+        self._schedule_timer.start()
 
         # ── 啟動後自動開始模擬（延遲 0.3s 確保 run loop 已就緒）────────────
         self._boot_timer = rumps.Timer(self._auto_start, 0.3)
@@ -289,6 +320,60 @@ class SimulateInputApp(rumps.App):
             self._add_log(f"▶ 無輸入 {self.idle_timeout}s，恢復模擬")
             self._request_ui("running", "狀態：執行中", "⏹  停止")
 
+    # ── 定時啟動/關閉 ───────────────────────────────────────────────────────────
+    def _check_schedule(self, _):
+        """每分鐘檢查是否需要自動啟動或關閉。"""
+        if not self.schedule_enabled:
+            return
+
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+        current_weekday = now.weekday()  # 0=週一, 6=週日
+
+        # 檢查今天是否應該執行
+        if not self._should_run_today(current_weekday):
+            return
+
+        # 檢查是否到達啟動時間
+        if current_time == self.schedule_start:
+            if not self._running:
+                self._add_log(f"⏰ 定時啟動 {self.schedule_start}")
+                self._start()
+
+        # 檢查是否到達關閉時間
+        elif current_time == self.schedule_stop:
+            if self._running:
+                self._add_log(f"⏰ 定時關閉 {self.schedule_stop}")
+                self._stop()
+
+    def _should_run_today(self, weekday: int) -> bool:
+        """檢查今天是否應該執行定時任務。weekday: 0=週一, 6=週日"""
+        if self.schedule_weekdays == "all":
+            return True
+        elif self.schedule_weekdays == "weekdays":
+            return weekday < 5  # 0-4 是週一到週五
+        elif self.schedule_weekdays == "weekend":
+            return weekday >= 5  # 5-6 是週六週日
+        elif self.schedule_weekdays.startswith("custom:"):
+            days = self.schedule_weekdays.split(":")[1].split(",")
+            return str(weekday) in days
+        return True
+
+    def _get_weekdays_label(self) -> str:
+        """取得執行日期的顯示標籤。"""
+        if self.schedule_weekdays == "all":
+            return "每天"
+        elif self.schedule_weekdays == "weekdays":
+            return "僅工作日"
+        elif self.schedule_weekdays == "weekend":
+            return "僅週末"
+        elif self.schedule_weekdays.startswith("custom:"):
+            days = self.schedule_weekdays.split(":")[1].split(",")
+            day_names = ["一", "二", "三", "四", "五", "六", "日"]
+            selected = [f"週{day_names[int(d)]}" for d in days]
+            return "自訂（" + "、".join(selected) + "）"
+        return "每天"
+
     # ── 設定持久化 ──────────────────────────────────────────────────────────────
     def _load_config(self) -> dict:
         try:
@@ -304,6 +389,10 @@ class SimulateInputApp(rumps.App):
                     "idle_timeout": self.idle_timeout,
                     "interval_min": self.interval_min,
                     "interval_max": self.interval_max,
+                    "schedule_enabled": self.schedule_enabled,
+                    "schedule_start": self.schedule_start,
+                    "schedule_stop": self.schedule_stop,
+                    "schedule_weekdays": self.schedule_weekdays,
                 }, f)
         except Exception:
             pass
@@ -376,6 +465,108 @@ class SimulateInputApp(rumps.App):
                 self._save_config()
             else:
                 rumps.alert("錯誤", "最長間隔必須大於最短間隔")
+
+    # ── 定時功能設定 ────────────────────────────────────────────────────────────
+    def toggle_schedule(self, sender):
+        """切換定時啟動/關閉功能。"""
+        self.schedule_enabled = not sender.state
+        sender.state = 1 if self.schedule_enabled else 0
+        status = "啟用" if self.schedule_enabled else "停用"
+        self._add_log(f"定時功能已{status}")
+        self._save_config()
+
+    def set_schedule_start(self, _):
+        """設定啟動時間。"""
+        w = rumps.Window(
+            message="輸入啟動時間（格式 HH:MM，例如 09:00）：",
+            title="設定啟動時間",
+            default_text=self.schedule_start,
+            ok="確認", cancel="取消",
+            dimensions=(200, 24)
+        )
+        r = w.run()
+        if r.clicked and self._validate_time(r.text.strip()):
+            self.schedule_start = r.text.strip()
+            self._schedule_start_item.title = f"啟動時間：{self.schedule_start}"
+            self._add_log(f"啟動時間設為 {self.schedule_start}")
+            self._save_config()
+        elif r.clicked:
+            rumps.alert("錯誤", "時間格式錯誤，請使用 HH:MM 格式（例如 09:00）")
+
+    def set_schedule_stop(self, _):
+        """設定關閉時間。"""
+        w = rumps.Window(
+            message="輸入關閉時間（格式 HH:MM，例如 18:00）：",
+            title="設定關閉時間",
+            default_text=self.schedule_stop,
+            ok="確認", cancel="取消",
+            dimensions=(200, 24)
+        )
+        r = w.run()
+        if r.clicked and self._validate_time(r.text.strip()):
+            self.schedule_stop = r.text.strip()
+            self._schedule_stop_item.title = f"關閉時間：{self.schedule_stop}"
+            self._add_log(f"關閉時間設為 {self.schedule_stop}")
+            self._save_config()
+        elif r.clicked:
+            rumps.alert("錯誤", "時間格式錯誤，請使用 HH:MM 格式（例如 18:00）")
+
+    def set_schedule_weekdays(self, _):
+        """設定執行日期。"""
+        w = rumps.Window(
+            message="選擇執行日期：\n1. 每天\n2. 僅工作日（週一～週五）\n3. 僅週末（週六～週日）\n4. 自訂（輸入數字，例如：0,1,2,3,4 表示週一到週五）",
+            title="設定執行日期",
+            default_text="1",
+            ok="確認", cancel="取消",
+            dimensions=(400, 24)
+        )
+        r = w.run()
+        if r.clicked:
+            choice = r.text.strip()
+            if choice == "1":
+                self.schedule_weekdays = "all"
+            elif choice == "2":
+                self.schedule_weekdays = "weekdays"
+            elif choice == "3":
+                self.schedule_weekdays = "weekend"
+            elif choice == "4":
+                # 再開一個對話框讓用戶輸入自訂日期
+                w2 = rumps.Window(
+                    message="輸入要執行的日期（0=週一, 6=週日）\n例如：0,1,2,3,4 表示週一到週五",
+                    title="自訂執行日期",
+                    default_text="0,1,2,3,4",
+                    ok="確認", cancel="取消",
+                    dimensions=(300, 24)
+                )
+                r2 = w2.run()
+                if r2.clicked and self._validate_weekdays(r2.text.strip()):
+                    self.schedule_weekdays = f"custom:{r2.text.strip()}"
+                elif r2.clicked:
+                    rumps.alert("錯誤", "格式錯誤，請輸入 0-6 的數字，以逗號分隔")
+                    return
+            else:
+                rumps.alert("錯誤", "請輸入 1、2、3 或 4")
+                return
+
+            self._schedule_weekdays_item.title = f"執行日期：{self._get_weekdays_label()}"
+            self._add_log(f"執行日期設為：{self._get_weekdays_label()}")
+            self._save_config()
+
+    def _validate_time(self, time_str: str) -> bool:
+        """驗證時間格式是否正確（HH:MM）。"""
+        try:
+            datetime.strptime(time_str, "%H:%M")
+            return True
+        except ValueError:
+            return False
+
+    def _validate_weekdays(self, weekdays_str: str) -> bool:
+        """驗證星期設定格式是否正確。"""
+        try:
+            days = [int(d.strip()) for d in weekdays_str.split(",")]
+            return all(0 <= d <= 6 for d in days)
+        except Exception:
+            return False
 
     # ── Log ─────────────────────────────────────────────────────────────────────
     def show_log(self, _):
